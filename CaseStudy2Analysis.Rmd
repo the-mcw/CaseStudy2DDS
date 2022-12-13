@@ -1,0 +1,509 @@
+---
+title: "6306_Project2"
+author: "Christopher Williams"
+date: "2022-11-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(MASS)
+library(tidyverse)
+library(readxl)
+library(caret)
+library(e1071)
+library(class)
+library(ggmosaic)
+library(ggthemes)
+library(aws.s3)
+```
+
+```{r}
+# importing full data
+#case2_full = s3read_using(FUN = read.csv,
+#                          stringsAsFactors = TRUE,
+#                          bucket = "smuddsproject2",
+#                          object = "CaseStudy2-data.csv")
+case2_full= read.csv("CaseStudy2-data.csv", stringsAsFactors = T)
+# importing no attrition data
+#case2_attr = s3read_using(FUN = read.csv,
+#                          bucket = "smuddsproject2",
+#                          object = "CaseStudy2CompSet No Attrition.csv")
+case2_attr = read.csv("CaseStudy2CompSet No Attrition.csv", stringsAsFactors = T)
+# importing no salary data
+#case2_sal = s3read_using(FUN = read_excel,
+#                         bucket = "smuddsproject2",
+#                         object = "CaseStudy2CompSet No Salary.xlsx")
+case2_sal = read_excel("CaseStudy2CompSet No Salary.xlsx")
+case2_sal[sapply(case2_sal, is.character)] = lapply(case2_sal[sapply(case2_sal, is.character)], as.factor)
+
+```
+
+## Attrition
+
+### Cleaning up Data
+```{r}
+
+work = case2_full %>%
+  mutate(Attrition = relevel(Attrition,ref = "Yes")) %>% 
+  dplyr::select(c(Attrition, BusinessTravel, DistanceFromHome, EnvironmentSatisfaction,
+                  Gender, HourlyRate, JobInvolvement, JobLevel, WorkLifeBalance, StockOptionLevel,
+                  OverTime, JobSatisfaction, MaritalStatus, NumCompaniesWorked, RelationshipSatisfaction,
+                  TotalWorkingYears, TrainingTimesLastYear, YearsAtCompany, YearsWithCurrManager, Age,
+                  NumCompaniesWorked, PerformanceRating, DailyRate, Education)) %>%
+  mutate(BusinessTravel = as.integer(ifelse(BusinessTravel=="Non-Travel",0,
+                                 ifelse(BusinessTravel=="Travel_Frequently",2,1))),
+         Gender = as.integer(ifelse(Gender=="Female",0,1)),
+         OverTime = as.integer(ifelse(OverTime=="No",0,1)),
+         MaritalStatus = as.integer(ifelse(MaritalStatus=="Married",2,
+                                           ifelse(MaritalStatus=="Divorced",1,0))))
+#oversampling for knn
+knn_over = work %>%
+  filter(Attrition=="Yes") %>%
+  slice_sample(n=450,replace = T)
+knn_over = work %>%
+  filter(Attrition=="No") %>%
+  bind_rows(knn_over)
+
+
+```
+
+
+### kNN attempt
+```{r, warning=FALSE}
+
+# params for iterated train/test split
+iterations = 750
+trainpct = .7
+acc = c()
+sens = c()
+spec = c()
+
+
+for (i in 1:iterations) {
+  #oversample 
+  knn_over = work %>%
+    filter(Attrition=="Yes") %>%
+    slice_sample(n=625,replace = T)
+  knn_over = work %>%
+    filter(Attrition=="No") %>%
+    bind_rows(knn_over)
+  #train-test split
+  split = sample(1:dim(knn_over)[1], round(trainpct*dim(knn_over)[1]))
+  train = knn_over %>% filter(row_number() %in% split)
+  train = data.frame(Attrition=train$Attrition,scale(train[,2:23]))
+  test = knn_over %>% filter(!(row_number() %in% split)) 
+  test = test %>% filter(!duplicated(test))
+  test = data.frame(Attrition=test$Attrition,scale(test[,2:23]))
+  #train model
+  knntrain = train(train[,2:23],train$Attrition,method = "knn", metric = "Spec",
+                   trControl = trainControl(method = "cv", summaryFunction = twoClassSummary))
+  
+  colMeans(knntrain$resample[,2:3])
+  preds = predict(knntrain,test[,2:23])
+  conf = confusionMatrix(preds,test$Attrition)
+  acc[i] = conf$overall[1]
+  sens[i] = conf$byClass[1]
+  spec[i] = conf$byClass[2]
+  
+}
+mean(acc)
+mean(sens)
+mean(spec)
+mean(sens)+mean(spec)
+```
+
+### Naive Bayes Attempt
+```{r}
+# factors made factors for nb model
+full = case2_full %>%
+  dplyr::select(!c(ID,EmployeeCount,EmployeeNumber,Over18,StandardHours,
+                   YearsInCurrentRole,YearsSinceLastPromotion)) %>%
+  mutate(Education = factor(Education,ordered = T),
+         EnvironmentSatisfaction = factor(EnvironmentSatisfaction,ordered = T),
+         JobInvolvement = factor(JobInvolvement,ordered = T),
+         JobSatisfaction = factor(JobSatisfaction,ordered = T),
+         JobLevel = factor(JobLevel,ordered = T),
+         PerformanceRating = factor(PerformanceRating,ordered = T),
+         RelationshipSatisfaction = factor(RelationshipSatisfaction,ordered = T),
+         StockOptionLevel = factor(StockOptionLevel,ordered = T),
+         TrainingTimesLastYear = factor(TrainingTimesLastYear,ordered = T),
+         WorkLifeBalance = factor(WorkLifeBalance,ordered = T),
+         Attrition = relevel(Attrition,ref = "Yes"))
+#oversampling for nb
+attr_over = full %>%
+  filter(Attrition=="Yes") %>%
+  slice_sample(n=300,replace = T)
+attr_over = full %>%
+  filter(Attrition=="No") %>%
+  bind_rows(attr_over)
+# separate predictors from responses, select predictors of interest
+over = attr_over %>% dplyr::select(c(Attrition, BusinessTravel, Department, DistanceFromHome, EnvironmentSatisfaction,
+                                     Gender, HourlyRate, JobInvolvement, JobLevel, JobRole, WorkLifeBalance,
+                                     StockOptionLevel, OverTime, JobSatisfaction, MaritalStatus, NumCompaniesWorked,
+                                     RelationshipSatisfaction, TotalWorkingYears, TrainingTimesLastYear, YearsAtCompany,
+                                     YearsWithCurrManager, Age, NumCompaniesWorked, PerformanceRating, DailyRate, Education))
+#  mutate(DistanceFromHome = cut(DistanceFromHome,5),
+#         NumCompaniesWorked = cut(NumCompaniesWorked,5),
+#         TotalWorkingYears = cut(TotalWorkingYears,5),
+#         YearsAtCompany = cut(YearsAtCompany,5),
+#         YearsWithCurrManager = cut(YearsWithCurrManager,5))
+```
+
+```{r}
+
+iterations = 100
+trainpct = .7
+acc = c()
+sens = c()
+spec = c()
+
+
+
+for (i in 1:iterations) {
+  split = sample(1:dim(over)[1], round(trainpct*dim(over)[1]))
+  train = over %>% filter(row_number() %in% split)
+#  test = attr_over %>% filter(!(row_number() %in% split)) %>% select(Attrition,OverTime,StockOptionLevel,JobLevel,cutMonthlyInc)
+  test = over %>% filter(!(row_number() %in% split)) 
+  test = test %>% filter(!duplicated(test))
+  
+  model = naiveBayes(Attrition~.,train)
+  pred = predict(model,test[,2:25])
+    
+  conf = confusionMatrix(pred,test$Attrition)
+  acc[i] = conf$overall[1]
+  sens[i] = conf$byClass[1]
+  spec[i] = conf$byClass[2]
+  
+}
+mean(acc)
+mean(sens)
+mean(spec)
+```
+
+# 3 Most Influential Factors
+```{r}
+# which used variables had the highest correlation with attrition
+corwork = work %>% mutate(Attrition = as.numeric(Attrition)) %>%
+  mutate(BusinessTravel = as.integer(ifelse(BusinessTravel=="Non-Travel",0,
+                                            ifelse(BusinessTravel=="Travel_Frequently",2,1))),
+         Gender = as.integer(ifelse(Gender=="Female",0,1)),
+         OverTime = as.integer(ifelse(OverTime=="No",0,1)),
+         MaritalStatus = as.integer(ifelse(MaritalStatus=="Married",2,
+                                           ifelse(MaritalStatus=="Divorced",1,0))))
+crdata = data.frame(cor(corwork))
+# Top attrition correlations
+crdata %>% slice_max(order_by = abs(Attrition),n=8) %>% dplyr::select(Attrition)
+
+# make the three variables useable for mosaic plots
+mosaic_data = case2_full %>%
+  dplyr::select(Attrition,JobInvolvement,JobLevel,OverTime, JobSatisfaction,BusinessTravel) %>%
+  mutate(Attrition = relevel(Attrition,ref = "Yes"),
+         JobInvolvement = factor(JobInvolvement,ordered = T),
+         JobLevel = factor(JobLevel,ordered = T),
+         JobSatisfaction = factor(JobSatisfaction,ordered = T))
+
+#OverTime
+mosaic_data %>%
+  ggplot() +
+  geom_mosaic(aes(x=product(Attrition,OverTime),fill=Attrition), show.legend = F) +
+  geom_mosaic_text(aes(x=product(Attrition,OverTime),fill=Attrition,label = after_stat(.wt)),
+                   show.legend = F, size = 7) +
+  scale_fill_wsj() +
+  labs(title = "Attrition and Working Over Time") +
+  theme(plot.title = element_text(size = 25),
+        axis.title = element_text(size=20),
+        axis.text = element_text(size = 15))
+
+#JobInvolvement
+mosaic_data %>%
+  ggplot() +
+  geom_mosaic(aes(x=product(Attrition,JobInvolvement),fill=Attrition), show.legend = F) +
+  geom_mosaic_text(aes(x=product(Attrition,JobInvolvement),fill=Attrition,label = after_stat(.wt)),
+                   show.legend = F, size = 7) +
+  scale_fill_wsj() +
+  labs(title = "Attrition and Involvment at Work",
+       x = "Job Involvment Level") +
+  theme(plot.title = element_text(size = 25),
+        axis.title = element_text(size=20),
+        axis.text = element_text(size = 15))
+
+#JobLevel
+mosaic_data %>%
+  ggplot() +
+  geom_mosaic(aes(x=product(Attrition,JobLevel),fill=Attrition), show.legend = F) +
+  geom_mosaic_text(aes(x=product(Attrition,JobLevel),fill=Attrition,label = after_stat(.wt)),
+                   show.legend = F, size = 7) +
+  scale_fill_wsj() +
+  labs(title = "Attrition and Employment Level",
+       x = "Job Level") +
+  theme(plot.title = element_text(size = 25),
+        axis.title = element_text(size=20),
+        axis.text = element_text(size = 15))
+```
+### Job Satisfaction
+```{r}
+corwork = case2_full %>% mutate(Attrition = as.numeric(Attrition)) %>%
+  mutate(BusinessTravel = as.integer(ifelse(BusinessTravel=="Non-Travel",0,
+                                            ifelse(BusinessTravel=="Travel_Frequently",2,1))),
+         Gender = as.integer(ifelse(Gender=="Female",0,1)),
+         OverTime = as.integer(ifelse(OverTime=="No",0,1)),
+         MaritalStatus = as.integer(ifelse(MaritalStatus=="Married",2,
+                                           ifelse(MaritalStatus=="Divorced",1,0)))) %>%
+  select_if(is.numeric)
+
+crdata = data.frame(cor(corwork))
+
+view(crdata %>% slice_max(order_by = abs(JobSatisfaction), n=18) %>% dplyr::select(JobSatisfaction) %>%
+  filter(JobSatisfaction<1))
+
+#Attrition
+mosaic_data %>%
+  ggplot() +
+  geom_mosaic(aes(x=product(JobSatisfaction,Attrition),fill=JobSatisfaction), show.legend = F) +
+  geom_mosaic_text(aes(x=product(JobSatisfaction,Attrition),fill=JobSatisfaction,
+                       label = round(after_stat(.wt)/sum(after_stat(.wt)),digits = 2)),
+                   show.legend = F, size = 7) +
+  scale_fill_wsj() +
+  labs(title = "Attrition and Job Satisfaction",
+       x = "Attrition") +
+  theme(plot.title = element_text(size = 25),
+        axis.title = element_text(size=20),
+        axis.text = element_text(size = 15))
+
+#BusinessTravel
+mosaic_data %>% mutate(BusinessTravel = factor(BusinessTravel,
+                                               levels = c("Non-Travel","Travel_Rarely",
+                                                          "Travel_Frequently"),
+                                               labels = c("None","Rare","Frequent"))) %>%
+  ggplot() +
+  geom_mosaic(aes(x=product(JobSatisfaction,BusinessTravel),fill=JobSatisfaction), show.legend = F) +
+  geom_mosaic_text(aes(x=product(JobSatisfaction,BusinessTravel),fill=JobSatisfaction,
+                       label = after_stat(.wt)),
+                   show.legend = F, size = 7) +
+  scale_fill_wsj() +
+  labs(title = "Business Travel and Job Satisfaction",
+       x = "Travel Frequency") +
+  theme(plot.title = element_text(size = 25),
+        axis.title = element_text(size=20),
+        axis.text = element_text(size = 15))
+
+
+#NumCompanies
+case2_full %>% mutate(JobSatisfaction = factor(JobSatisfaction,ordered = T)) %>%
+  dplyr::select(JobSatisfaction,NumCompaniesWorked) %>%
+  ggplot(aes(x = NumCompaniesWorked)) +
+  geom_bar(aes(fill = JobSatisfaction), show.legend = F) +
+  facet_grid(rows = vars(factor(JobSatisfaction,levels = 4:1))) +
+  scale_fill_wsj() +
+  labs(title = "Number of Companies Worked and Job Satisfaction",
+       x = "Number of Companies Worked") +
+#  scale_y_continuous(sec.axis = sec_axis(~ . , name = "Job Satisfaction", breaks = NULL, labels = NULL)) +
+  theme(plot.title = element_text(size = 20),
+        axis.title = element_text(size=20),
+        axis.text = element_text(size = 15),
+        axis.title.y.right = element_text(vjust=1))
+  
+```
+
+### Attrition Predictions
+```{r}
+# over sample
+knn_over = work %>%
+  filter(Attrition=="Yes") %>%
+  slice_sample(n=625,replace = T)
+knn_over = work %>%
+  filter(Attrition=="No") %>%
+  bind_rows(knn_over)
+train = data.frame(Attrition=knn_over$Attrition,scale(knn_over[,2:23]))
+
+# prediction model
+knntrain = train(train[,2:23],train$Attrition,method = "knn", metric = "Spec",
+                 trControl = trainControl(method = "cv", summaryFunction = twoClassSummary))
+
+# prepping test data
+comp = data.frame(case2_attr %>%
+  dplyr::select(c(BusinessTravel, DistanceFromHome, EnvironmentSatisfaction,
+                  Gender, HourlyRate, JobInvolvement, JobLevel, WorkLifeBalance, StockOptionLevel,
+                  OverTime, JobSatisfaction, MaritalStatus, NumCompaniesWorked, RelationshipSatisfaction,
+                  TotalWorkingYears, TrainingTimesLastYear, YearsAtCompany, YearsWithCurrManager, Age,
+                  NumCompaniesWorked, PerformanceRating, DailyRate, Education)) %>%
+  mutate(BusinessTravel = as.integer(ifelse(BusinessTravel=="Non-Travel",0,
+                                 ifelse(BusinessTravel=="Travel_Frequently",2,1))),
+         Gender = as.integer(ifelse(Gender=="Female",0,1)),
+         OverTime = as.integer(ifelse(OverTime=="No",0,1)),
+         MaritalStatus = as.integer(ifelse(MaritalStatus=="Married",2,
+                                           ifelse(MaritalStatus=="Divorced",1,0)))) %>%
+  scale(), ID = case2_attr$ID)
+
+
+# Make Predictions
+AttritionPredictions = data.frame(ID = comp$ID,Attrition = predict(knntrain,comp[1:22]))
+write.csv(AttritionPredictions, "Case2PredictionsWilliams Attrition.csv")
+```
+
+
+
+## Monthly Income
+```{r}
+
+# turn as many variables into numerics to get correlations
+numdata = case2_full %>%
+  mutate(Attrition = as.numeric(factor(Attrition,levels = c("No","Yes"),labels = c(0,1))),
+         BusinessTravel = as.numeric(factor(BusinessTravel,
+                                 levels = c("Non-Travel","Travel_Rarely","Travel_Frequently"),
+                                 labels = c(0,1,2))),
+         Gender = as.numeric(factor(Gender,levels = c("Female","Male"),labels = 0:1)),
+         OverTime = as.numeric(factor(OverTime,levels = c("No","Yes"),labels = 0:1)),
+         MaritalStatus = as.numeric(factor(MaritalStatus,
+                                levels = c("Single","Divorced","Married"),labels = 0:2))) %>%
+  dplyr::select(!c(Department,EducationField,JobRole,Over18,EmployeeCount,StandardHours))
+cardata = data.frame(cor(numdata))
+```
+
+
+```{r}
+lmdata =case2_full %>%
+  mutate(JobLevel = factor(JobLevel),
+         TotalWorkingYears = ifelse(TotalWorkingYears==0,0.01,TotalWorkingYears),
+         StockOptionLevel = factor(StockOptionLevel),
+         sqrtTotal = sqrt(TotalWorkingYears),
+         RoleLevel = relevel(fct_collapse(JobRole,
+                                  "Entry" = c("Human Resources","Laboratory Technician","Research Scientist","Sales Representative"),
+                                  "Middle" = c("Healthcare Representative","Manufacturing Director","Sales Executive"),
+                                  "Upper" = c("Manager","Research Director")),
+                             ref = "Entry")) %>%
+  dplyr::select(-c(EmployeeCount,Over18,StandardHours)) %>%
+  filter(!c(case2_full$ID %in% c(373,485,489)))
+
+iterations = 5000
+trainpct = .7
+rms = c()
+rsq = c()
+bics = c()
+
+
+for (i in 1:iterations) {
+  split = sample(1:length(lmdata$ID),
+                 round(trainpct*length(lmdata$ID)))
+  train = lmdata %>% filter(row_number() %in% split)
+  test = lmdata %>% filter(!(row_number() %in% split))
+  fit_simp = lm(MonthlyIncome~ BusinessTravel + DailyRate + 
+    sqrtTotal * JobLevel + RoleLevel + TotalWorkingYears * JobLevel,train)
+  preds = predict(fit_simp,test)
+  rms[i] = sqrt(sum((test$MonthlyIncome-preds)^2)/length(preds))
+  
+}
+mean(rms)
+
+
+
+
+fit_lm = lm(MonthlyIncome~JobLevel*sqrtTotal,lmdata)
+#fit_lm2 = lm(MonthlyIncome~JobLevel*TotalWorkingYears+TotalWorkingYears*NumCompaniesWorked,case2_full)
+#fit_lm3 = lm(MonthlyIncome~JobLevel*TotalWorkingYears+JobLevel*I(TotalWorkingYears^2),case2_full)
+fit_lm4 = lm(MonthlyIncome~JobLevel*sqrtTotal+DistanceFromHome,lmdata)
+
+summary(fit_lm)
+BIC(fit_lm)
+#summary(fit_lm2)
+#BIC(fit_lm2)
+summary(fit_lm4)
+BIC(fit_lm4)
+
+names(case2_full)
+```
+
+```{r}
+library(car)
+lmdata = lmdata %>%
+  select(!c(EmployeeNumber,YearsInCurrentRole,YearsSinceLastPromotion))
+trainpct = .7
+
+split = sample(1:length(lmdata$ID),
+                 round(trainpct*length(lmdata$ID)))
+train = lmdata %>% filter(row_number() %in% split)
+test = lmdata %>% filter(!(row_number() %in% split))
+  
+fit_init = lm(MonthlyIncome~.,data = lmdata)
+step_fit = stepAIC(fit_init,direction = "both",trace = 0)
+
+summary(step_fit)
+fit_sec = lm(MonthlyIncome~.^2,lmdata)
+#step_fit2 = stepAIC(fit_sec,direction = "forward", steps = 2000, k=log(867))
+#summary(step_fit2)
+
+fit_simp = lm(MonthlyIncome~ BusinessTravel + DailyRate + 
+    sqrtTotal * JobLevel + RoleLevel + TotalWorkingYears * JobLevel,lmdata)
+summary(fit_simp)
+#vif(fit_simp)
+```
+
+```{r}
+lmdata %>%
+  ggplot(aes(y = MonthlyIncome,x = (TotalWorkingYears),color = JobLevel)) +
+  geom_point() +
+  facet_wrap(~JobLevel)
+```
+
+### Monthly Salary Predictions
+```{r}
+comp_sal = case2_sal %>%
+  mutate(JobLevel = factor(JobLevel),
+         TotalWorkingYears = ifelse(TotalWorkingYears==0,0.01,TotalWorkingYears),
+         StockOptionLevel = factor(StockOptionLevel),
+         sqrtTotal = sqrt(TotalWorkingYears),
+         RoleLevel = relevel(fct_collapse(JobRole,
+                                  "Entry" = c("Human Resources","Laboratory Technician",
+                                              "Research Scientist","Sales Representative"),
+                                  "Middle" = c("Healthcare Representative","Manufacturing Director",
+                                               "Sales Executive"),
+                                  "Upper" = c("Manager","Research Director")),
+                             ref = "Entry")) %>%
+  dplyr::select(-c(EmployeeCount,Over18,StandardHours))
+
+
+
+SalaryPredictions = data.frame(ID = comp$ID,MonthlyIncome = predict(fit_simp,comp_sal))
+write.csv(SalaryPredictions, "Case2PredictionsWilliams Salary.csv")
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
