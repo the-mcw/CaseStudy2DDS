@@ -16,4 +16,4 @@ DDSAnalytics is an analytics company that specializes in talent management solut
 ### RShiny App  
 [Interactive visualizaton of categorical variables of the employee retention data.](https://the-mcw.shinyapps.io/6306_CaseStudy2_FritoLay/)  
 ### Video Presentation of Analysis
-Coming Soon TM
+[Youtube Link](https://youtu.be/hLMJyNuX_N8)
